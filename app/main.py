@@ -38,7 +38,7 @@ HUMAN = {"amount": "unusually large or small payment amount", "log_amount": "unu
          "hour": "unusual time of day", "tx_rate_5min": "burst of platform-wide payments in last 5 minutes",
          "anomaly_score": "overall pattern looks unusual vs normal behaviour"}
 
-BUILD = os.getenv("GIT_SHA") or os.getenv("RENDER_GIT_COMMIT") or "unknown"     # which commit is running (used by the post-deploy check)
+BUILD = os.getenv("RENDER_GIT_COMMIT") or os.getenv("GIT_SHA") or "unknown"     # which commit is running (used by the post-deploy check)
 STATE = {"bundle": None, "error": None}
 STATS = {"lock": threading.Lock(), "lat": deque(maxlen=2000), "scores": deque(maxlen=5000), "decisions": Counter(), "requests": 0, "errors": 0}
 
