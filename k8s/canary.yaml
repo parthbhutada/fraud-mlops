@@ -1,0 +1,26 @@
+# Canary: the Service selects app=fraud-api, so traffic splits across stable + canary pods in proportion to pod counts.
+# 9 stable : 1 canary ~ 10% canary traffic. Watch /stats; roll back with `kubectl delete -f k8s/canary.yaml`.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fraud-api-canary
+  labels: {app: fraud-api}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: fraud-api, track: canary}
+  template:
+    metadata:
+      labels: {app: fraud-api, track: canary}
+    spec:
+      containers:
+        - name: api
+          image: fraud-api:local                        # the candidate image tag
+          imagePullPolicy: IfNotPresent
+          ports: [{containerPort: 8000}]
+          readinessProbe: {httpGet: {path: /ready, port: 8000}, initialDelaySeconds: 5, periodSeconds: 5}
+          livenessProbe: {httpGet: {path: /health, port: 8000}, initialDelaySeconds: 10, periodSeconds: 10}
+          resources:
+            requests: {cpu: 250m, memory: 512Mi}
+            limits: {cpu: "1", memory: 1Gi}
+          securityContext: {runAsNonRoot: true, allowPrivilegeEscalation: false}

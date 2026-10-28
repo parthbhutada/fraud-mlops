@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fraud-api
+  labels: {app: fraud-api}
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxSurge: 1, maxUnavailable: 0}     # zero-downtime rollout; failed readiness keeps old pods serving
+  selector:
+    matchLabels: {app: fraud-api, track: stable}
+  template:
+    metadata:
+      labels: {app: fraud-api, track: stable}
+    spec:
+      containers:
+        - name: api
+          image: fraud-api:local                        # CI replaces with ghcr.io/<owner>/<repo>/fraud-api:<git-sha>
+          imagePullPolicy: IfNotPresent
+          ports: [{containerPort: 8000}]
+          readinessProbe: {httpGet: {path: /ready, port: 8000}, initialDelaySeconds: 5, periodSeconds: 5}
+          livenessProbe: {httpGet: {path: /health, port: 8000}, initialDelaySeconds: 10, periodSeconds: 10}
+          resources:
+            requests: {cpu: 250m, memory: 512Mi}
+            limits: {cpu: "1", memory: 1Gi}
+          securityContext: {runAsNonRoot: true, allowPrivilegeEscalation: false}

@@ -1,0 +1,20 @@
+name: k8s-kind-demo
+on: workflow_dispatch                      # manual: shows the manifests deploy and serve on a real Kubernetes cluster (kind)
+jobs:
+  kind:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build --build-arg GIT_SHA=${GITHUB_SHA} -t fraud-api:local .
+      - uses: helm/kind-action@v1
+        with: {cluster_name: fraud}
+      - run: kind load docker-image fraud-api:local --name fraud
+      - run: kubectl apply -f k8s/deployment.yaml -f k8s/service.yaml -f k8s/hpa.yaml
+      - run: kubectl rollout status deployment/fraud-api --timeout=180s
+      - name: Call the service through the cluster
+        run: |
+          kubectl port-forward svc/fraud-api 8080:80 &
+          sleep 5
+          curl -fsS localhost:8080/ready
+          curl -fsS -X POST localhost:8080/score -H 'content-type: application/json' -d @tests/data/sample_fraud.json
+          kubectl get deploy,pods,hpa

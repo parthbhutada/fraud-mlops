@@ -1,0 +1,76 @@
+name: fraud-mlops-ci-cd
+on:
+  push: {branches: [main]}
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+  packages: write
+concurrency:
+  group: fraud-api-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:                                   # 1. quality gate: schema, parity with notebook scores, behaviour, latency, version skew
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.13", cache: pip}
+      - run: pip install -r requirements-ml.txt -r requirements.txt -r requirements-dev.txt
+      - run: pytest -q
+
+  build:                                  # 2. container build + smoke test, 3. push to registry (main only)
+    needs: test
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build --build-arg GIT_SHA=${GITHUB_SHA} -t fraud-api:ci .
+      - name: Container smoke test (real HTTP calls against the container)
+        run: |
+          docker run -d --name api -p 8000:8000 fraud-api:ci
+          for i in $(seq 1 30); do curl -fs localhost:8000/ready && break; sleep 2; done
+          curl -fsS localhost:8000/ready
+          curl -fsS -X POST localhost:8000/score -H 'content-type: application/json' -d @tests/data/sample_fraud.json | tee out.json
+          python3 -c "import json; assert json.load(open('out.json'))['decision'] != 'APPROVE', 'known fraud was approved'"
+          curl -fsS localhost:8000/stats
+      - name: Show container logs on failure
+        if: failure()
+        run: docker logs api
+      - name: Push image to GHCR (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}/fraud-api"
+          echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker tag fraud-api:ci "$IMAGE:${GITHUB_SHA}"; docker tag fraud-api:ci "$IMAGE:latest"
+          docker push "$IMAGE:${GITHUB_SHA}"; docker push "$IMAGE:latest"
+
+  deploy:                                 # 4. deploy via REST (Render deploy hook), 5. verify live, 6. auto-rollback
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    env:
+      HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}     # deploy steps are skipped (job stays green) until this secret exists
+      SERVICE_URL: ${{ vars.SERVICE_URL }}            # e.g. https://fraud-api.onrender.com
+    steps:
+      - uses: actions/checkout@v4
+      - name: Trigger deploy of exactly this commit
+        if: env.HOOK != ''
+        run: curl -fsS "${HOOK}&ref=${GITHUB_SHA}"
+      - name: Verify live service runs this commit and scores correctly
+        if: env.HOOK != '' && env.SERVICE_URL != ''
+        run: |
+          for i in $(seq 1 90); do
+            b=$(curl -fs "$SERVICE_URL/model/info" | python3 -c "import sys,json; print(json.load(sys.stdin).get('build',''))" 2>/dev/null || true)
+            [ -n "$b" ] && [ "${GITHUB_SHA:0:7}" = "${b:0:7}" ] && break
+            echo "waiting for new build (live: ${b:-down})"; sleep 10
+          done
+          [ "${GITHUB_SHA:0:7}" = "${b:0:7}" ] || { echo "new build never became live"; exit 1; }
+          curl -fsS -X POST "$SERVICE_URL/score" -H 'content-type: application/json' -d @tests/data/sample_fraud.json | tee out.json
+          python3 -c "import json; assert json.load(open('out.json'))['decision'] != 'APPROVE'"
+      - name: Roll back to previous commit if verification failed
+        if: failure() && env.HOOK != '' && github.event.before != '0000000000000000000000000000000000000000'
+        run: curl -fsS "${HOOK}&ref=${{ github.event.before }}"
